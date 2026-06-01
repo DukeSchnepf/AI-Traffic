@@ -81,6 +81,12 @@ class MAPPOConfig:
     critic_lr: float = 1e-3
     ppo_epochs: int = 4
     minibatch_size: int = 2048
+    # Advantage normalization scope:
+    #   "pooled"    -> one mean/std over all (sample, light) entries
+    #   "per_light" -> mean/std per light column, isolating each light's
+    #                  own advantage scale (tests whether pooled norm
+    #                  washes out per-light action signal).
+    adv_norm: str = "pooled"
 
     # Architecture
     embed_dim: int = 128
@@ -401,6 +407,17 @@ class MAPPOTrainer:
     def _ppo_update(self, traj: dict) -> dict:
         """K epochs over the rollout; per-minibatch advantage norm."""
         adv, returns = self._compute_advantages(traj)
+        # --- Diagnostic: RAW (pre-normalization) advantage + return scale.
+        # If raw adv std is tiny, every action looks equally good to the
+        # policy gradient -> the actor gets near-zero learning signal and
+        # never sharpens, regardless of the mean-0 normalization that
+        # makes pol_loss look ~0. This is the number that distinguishes
+        # "reward too flat" from "actor-update bug".
+        adv_raw_mean = float(np.mean(adv))
+        adv_raw_std = float(np.std(adv))
+        adv_raw_absmax = float(np.max(np.abs(adv)))
+        ret_raw_mean = float(np.mean(returns))
+        ret_raw_std = float(np.std(returns))
         # Flatten over (time, light) for shuffled minibatching.
         T, n = traj["rewards"].shape
         flat_idx = np.arange(T * n).reshape(T, n)
@@ -422,7 +439,8 @@ class MAPPOTrainer:
         ret_all = torch.from_numpy(returns).to(device)
 
         logs = {"pol_loss": [], "val_loss": [], "entropy": [],
-                "approx_kl": []}
+                "approx_kl": [], "ratio_dev": [],
+                "actor_head_gn": [], "critic_head_gn": []}
 
         steps = T
         for _epoch in range(self.cfg.ppo_epochs):
@@ -436,8 +454,18 @@ class MAPPOTrainer:
                 idx_t = torch.from_numpy(idx).long().to(device)
 
                 # Per-minibatch advantage normalization (PLAN_V2.md §1.2).
+                # mb_adv shape (B, n_tls).
                 mb_adv = adv_all[idx_t]
-                mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+                if self.cfg.adv_norm == "per_light":
+                    # Normalize each light's advantage stream independently
+                    # (mean/std over the batch dim, per column). Removes
+                    # cross-light magnitude differences so the policy
+                    # gradient reflects within-light action quality, not
+                    # which light happened to have larger raw advantages.
+                    mb_adv = ((mb_adv - mb_adv.mean(dim=0, keepdim=True))
+                              / (mb_adv.std(dim=0, keepdim=True) + 1e-8))
+                else:
+                    mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
                 # Forward through the V2 stack for the whole minibatch
                 # in one batched pass. No Python loop over (B, N_tls),
@@ -484,11 +512,27 @@ class MAPPOTrainer:
                 self.actor_opt.zero_grad()
                 self.critic_opt.zero_grad()
                 loss.backward()
+                # --- Diagnostic: per-head PRE-clip grad norm (inf = measure,
+                # no clipping). If critic_head_gn >> actor_head_gn, a single
+                # global clip renormalizes by the critic's magnitude and
+                # scales the actor's gradient down with it -> actor starves.
+                actor_head_gn = float(nn.utils.clip_grad_norm_(
+                    self.actor.parameters(), float("inf")))
+                critic_head_gn = float(nn.utils.clip_grad_norm_(
+                    self.critic.parameters(), float("inf")))
+                # --- Fix: clip actor-path and critic gradients SEPARATELY so
+                # the value loss (val_loss ~270 vs pol_loss ~0) can't drag
+                # the actor's clip factor. Each gets its own max_grad_norm
+                # budget. This replaces the prior single global clip over
+                # all params, which was starving the actor (diagnostic:
+                # adv_std=22 but ratio_dev=0.013).
                 nn.utils.clip_grad_norm_(
                     list(self.encoder.parameters())
                     + list(self.gat.parameters())
-                    + list(self.actor.parameters())
-                    + list(self.critic.parameters()),
+                    + list(self.actor.parameters()),
+                    self.cfg.max_grad_norm)
+                nn.utils.clip_grad_norm_(
+                    self.critic.parameters(),
                     self.cfg.max_grad_norm)
                 self.actor_opt.step()
                 self.critic_opt.step()
@@ -496,13 +540,29 @@ class MAPPOTrainer:
                 self._update_gat_schedule()
 
                 approx_kl = (old_logprobs - new_logprobs).mean().item()
+                # How far the updated policy moved off the rollout policy.
+                # ratio==1 everywhere => policy not changing within the
+                # update. Healthy PPO sees mean |ratio-1| grow across the
+                # K epochs.
+                ratio_dev = float((ratio - 1.0).abs().mean().detach())
                 logs["pol_loss"].append(float(pol_loss.detach()))
                 logs["val_loss"].append(float(val_loss.detach()))
                 logs["entropy"].append(float(entropy.mean().detach()))
                 logs["approx_kl"].append(approx_kl)
+                logs["ratio_dev"].append(ratio_dev)
+                logs["actor_head_gn"].append(actor_head_gn)
+                logs["critic_head_gn"].append(critic_head_gn)
 
-        return {k: float(np.mean(v)) for k, v in logs.items()
-                if len(v) > 0}
+        out = {k: float(np.mean(v)) for k, v in logs.items()
+               if len(v) > 0}
+        # Attach the raw-advantage diagnostics (computed once per update,
+        # not per minibatch).
+        out["adv_raw_mean"] = adv_raw_mean
+        out["adv_raw_std"] = adv_raw_std
+        out["adv_raw_absmax"] = adv_raw_absmax
+        out["ret_raw_mean"] = ret_raw_mean
+        out["ret_raw_std"] = ret_raw_std
+        return out
 
     # ---------- checkpoint ----------
 
@@ -687,6 +747,10 @@ class MAPPOTrainer:
                   f"val={logs.get('val_loss', float('nan')):+.4f}  "
                   f"ent={logs.get('entropy', float('nan')):+.3f}  "
                   f"kl={logs.get('approx_kl', float('nan')):+.4f}  "
+                  f"adv_std={logs.get('adv_raw_std', float('nan')):.3f}  "
+                  f"ratio_dev={logs.get('ratio_dev', float('nan')):.4f}  "
+                  f"a_gn={logs.get('actor_head_gn', float('nan')):.3f}  "
+                  f"c_gn={logs.get('critic_head_gn', float('nan')):.1f}  "
                   f"gat_lr={self.actor_opt.param_groups[1]['lr']:.2e}")
 
             self._log_jsonl({
@@ -806,6 +870,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--plateau-episodes", type=int, default=100,
                    help="Stop if no eval improvement for N episodes "
                         "(0 disables).")
+    p.add_argument("--actor-lr", type=float, default=None,
+                   help="Override actor LR (MAPPOConfig default 3e-4).")
+    p.add_argument("--entropy-coef", type=float, default=None,
+                   help="Override initial entropy coefficient "
+                        "(MAPPOConfig default 0.01).")
+    p.add_argument("--entropy-coef-final", type=float, default=None,
+                   help="Override final entropy coefficient "
+                        "(MAPPOConfig default 0.005).")
+    p.add_argument("--adv-norm", choices=["pooled", "per_light"],
+                   default=None,
+                   help="Advantage normalization scope (default pooled).")
     return p.parse_args()
 
 
@@ -827,6 +902,15 @@ def main() -> int:
         env = MultiTlsEnv(**env_kwargs)
         eval_env = None  # trainer falls back to training env
 
+    cfg_overrides = {}
+    if args.actor_lr is not None:
+        cfg_overrides["actor_lr"] = args.actor_lr
+    if args.entropy_coef is not None:
+        cfg_overrides["entropy_coef"] = args.entropy_coef
+    if args.entropy_coef_final is not None:
+        cfg_overrides["entropy_coef_final"] = args.entropy_coef_final
+    if args.adv_norm is not None:
+        cfg_overrides["adv_norm"] = args.adv_norm
     cfg = MAPPOConfig(
         total_episodes=args.episodes,
         rollout_episodes=args.rollout_episodes,
@@ -835,6 +919,7 @@ def main() -> int:
         eval_every_updates=args.eval_every,
         eval_seeds=tuple(args.eval_seeds),
         plateau_episodes=args.plateau_episodes,
+        **cfg_overrides,
     )
     trainer = MAPPOTrainer(env, cfg, device=args.device,
                            eval_env=eval_env)
