@@ -41,6 +41,57 @@ def test_phase_embeddings_batched_shape():
         f"phase embeds {pe.shape} != (B, {P_MAX}, {EMBED})"
 
 
+def test_q_per_phase_discrimination():
+    """Perturbing ONE phase's served movements must change THAT phase's
+    Q materially, while leaving other (real) phases' Q nearly unchanged.
+    This is the §5 no-dilution guarantee: Q(phase_i) depends on phase i's
+    own features, not a phase-constant embedding."""
+    from v3.frap_q_net import FRAPQNet
+    net = FRAPQNet(mov_feat_dim=3, embed_dim=EMBED)
+    net.eval()
+
+    # One light: 3 real phases, disjoint served movements so a change to
+    # phase 0's movements cannot leak through shared movements.
+    M = 9
+    mov = torch.zeros(1, M, 3)
+    mov[0, :, 0] = 1.0  # uniform baseline halting
+    pm = torch.zeros(1, P_MAX, M, dtype=torch.bool)
+    pm[0, 0, 0:3] = True
+    pm[0, 1, 3:6] = True
+    pm[0, 2, 6:9] = True
+    phase = torch.zeros(1, P_MAX, dtype=torch.bool)
+    phase[0, :3] = True
+
+    with torch.no_grad():
+        q_base = net(mov, pm, phase)[0].clone()   # (P_max,)
+        mov2 = mov.clone()
+        mov2[0, 0:3, 0] += 25.0                    # spike phase 0's lanes
+        q_after = net(mov2, pm, phase)[0]
+
+    d0 = (q_after[0] - q_base[0]).abs().item()
+    d_others = (q_after[1:3] - q_base[1:3]).abs().max().item()
+    assert d0 > 1e-3, f"phase 0 Q did not respond to its own change ({d0})"
+    assert d_others < d0 * 0.25, \
+        f"change leaked into other phases (d0={d0}, others={d_others})"
+
+
+def test_q_masks_padded_phases():
+    """Q at padded (non-real) phase slots must be -inf so argmax never
+    selects them."""
+    from v3.frap_q_net import FRAPQNet
+    net = FRAPQNet(mov_feat_dim=3, embed_dim=EMBED)
+    mov, pm, phase = _synth(2)
+    q = net(mov, pm, phase)             # (B, P_max)
+    masked = q[~phase]
+    # Masked with -1e9 (not -inf: keeps the DQN target NaN-safe and
+    # matches the codebase convention). Just needs to be far below any
+    # real Q so argmax never selects a padded slot.
+    assert (masked < -1e8).all(), \
+        "padded phase slots must be strongly negative (never argmax-able)"
+
+
 if __name__ == "__main__":
     test_phase_embeddings_batched_shape()
-    print("task1 OK")
+    test_q_per_phase_discrimination()
+    test_q_masks_padded_phases()
+    print("task2 OK")
