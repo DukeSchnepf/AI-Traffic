@@ -27,7 +27,7 @@ sys.path.insert(0, str(_THIS_DIR.parent.parent))  # SUMO/v2/ai
 from v2.frap_encoder import FRAPEncoder  # noqa: E402
 from v2.colight_gat import CoLightGAT  # noqa: E402
 from v2.shared_policy import SharedActor  # noqa: E402
-from v2.centralized_critic import CentralCritic  # noqa: E402
+from v2.centralized_critic import CentralCritic, IndependentCritic  # noqa: E402
 from v2.inference_adapter import V2CorridorPolicy  # noqa: E402
 
 # Note: ``MAPPOConfig`` lives in ``v2.mappo_trainer`` which imports
@@ -412,6 +412,48 @@ def test_cosine_lr_schedule() -> None:
     print("OK")
 
 
+def test_independent_critic() -> None:
+    """IndependentCritic returns a per-light value vector, and each
+    light's value depends ONLY on its own embedding (the property that
+    fixes the centralized critic's credit assignment)."""
+    print("  test_independent_critic ... ", end="")
+    critic = IndependentCritic(embed_dim=EMBED_DIM, n_tls=N_TLS)
+
+    # Single-step shape: (n_tls, embed) -> (n_tls,)
+    le_single = torch.randn(N_TLS, EMBED_DIM)
+    v_single = critic(le_single)
+    assert v_single.shape == (N_TLS,), \
+        f"single-step value {v_single.shape} != ({N_TLS},)"
+
+    # Batched shape: (B, n_tls, embed) -> (B, n_tls)
+    B = 5
+    le_batch = torch.randn(B, N_TLS, EMBED_DIM)
+    v_batch = critic(le_batch)
+    assert v_batch.shape == (B, N_TLS), \
+        f"batched value {v_batch.shape} != ({B}, {N_TLS})"
+
+    # Independence: perturbing light k's embedding must not change any
+    # other light's value (per-light credit assignment requires this).
+    with torch.no_grad():
+        base = critic(le_single).clone()
+        perturbed = le_single.clone()
+        perturbed[3] += 10.0  # large change to light 3 only
+        after = critic(perturbed)
+        others = torch.arange(N_TLS) != 3
+        max_drift = (after[others] - base[others]).abs().max().item()
+        assert max_drift < 1e-5, \
+            f"light 3's perturbation leaked into others (drift {max_drift})"
+        assert (after[3] - base[3]).abs().item() > 1e-4, \
+            "light 3's own value did not respond to its perturbation"
+
+    # Gradients flow.
+    v = critic(le_batch).sum()
+    v.backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for p in critic.parameters()), "no gradient in critic"
+    print("OK")
+
+
 def main() -> int:
     print("V2 smoke tests:")
     test_frap_only()
@@ -422,6 +464,7 @@ def main() -> int:
     test_batched_minibatch_shapes()
     test_inference_adapter_roundtrip()
     test_cosine_lr_schedule()
+    test_independent_critic()
     print("\nAll smoke tests passed.")
     return 0
 

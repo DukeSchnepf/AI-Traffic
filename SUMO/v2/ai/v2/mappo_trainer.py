@@ -47,7 +47,7 @@ from multi_env import MultiTlsEnv, load_adjacency  # noqa: E402
 from v2.frap_encoder import FRAPEncoder  # noqa: E402
 from v2.colight_gat import CoLightGAT  # noqa: E402
 from v2.shared_policy import SharedActor  # noqa: E402
-from v2.centralized_critic import CentralCritic  # noqa: E402
+from v2.centralized_critic import CentralCritic, IndependentCritic  # noqa: E402
 
 import math as _math  # noqa: E402 — used by cosine_lr below
 
@@ -93,6 +93,22 @@ class MAPPOConfig:
     gat_heads: int = 4
     gat_head_dim: int = 32
     critic_hidden: int = 512
+    # Critic credit-assignment mode:
+    #   "independent" -> per-light value V_i(s_i), each light's advantage
+    #                    uses its own baseline (IPPO-style). Default after
+    #                    the centralized critic was diagnosed as the cause
+    #                    of the actor never learning.
+    #   "centralized" -> single joint value V(s) broadcast to all lights
+    #                    (original MAPPO-CTDE design; kept for comparison).
+    critic_mode: str = "independent"
+    # Detach the critic's input from the shared FRAP encoder. The encoder
+    # feeds BOTH the actor (via prelogits + GAT embedding) and the critic;
+    # the value gradient (critic_gn ~50) is ~100x the actor's (~0.5), so
+    # it dominates the shared encoder and keeps reshaping the policy's
+    # representation faster than the actor can sharpen it. Detaching makes
+    # the encoder policy-only (the critic adapts to it). Default off until
+    # the 30-ep diagnostic confirms it revives the actor.
+    detach_critic_input: bool = False
 
     # GAT unfreeze schedule (steps refer to gradient updates).
     # Earlier thresholds (1500 / 2000) let the FRAP+critic-only policy
@@ -180,10 +196,13 @@ class MAPPOTrainer:
                               num_heads=cfg.gat_heads,
                               head_dim=cfg.gat_head_dim).to(self.device)
         self.actor = SharedActor(embed_dim=cfg.embed_dim).to(self.device)
-        self.critic = CentralCritic(embed_dim=cfg.embed_dim,
-                                    n_tls=self.n_tls,
-                                    hidden_dim=cfg.critic_hidden
-                                    ).to(self.device)
+        critic_cls = (IndependentCritic
+                      if cfg.critic_mode == "independent"
+                      else CentralCritic)
+        self.critic = critic_cls(embed_dim=cfg.embed_dim,
+                                 n_tls=self.n_tls,
+                                 hidden_dim=cfg.critic_hidden
+                                 ).to(self.device)
 
         # Two optimizers so actor LR != critic LR (MAPPO recipe). The
         # GAT goes in with the actor since its gradients flow through
@@ -378,12 +397,18 @@ class MAPPOTrainer:
         a single joint value baseline.
         """
         rewards = traj["rewards"]   # (T, n_tls)
-        values = traj["values"]     # (T,) scalar joint value
+        values = traj["values"]     # (T,) joint  OR  (T, n_tls) per-light
         dones = traj["dones"]       # (T,) bool
         T, n = rewards.shape
 
-        # Broadcast joint value to per-light.
-        v = np.broadcast_to(values.reshape(T, 1), (T, n))
+        # Shape-driven: centralized critic stores a scalar joint value
+        # per step -> broadcast to per-light. Independent critic already
+        # stores a per-light value vector -> use as-is, so each light's
+        # GAE runs against its own baseline.
+        if values.ndim == 1:
+            v = np.broadcast_to(values.reshape(T, 1), (T, n))
+        else:
+            v = values
         # Bootstrap last value from a "virtual" V(s_T) of zero on done.
         # Cheap and consistent: episodes end at fixed horizon, so V(s_T)
         # is mostly noise. Refine here if it shows up as bias later.
@@ -477,7 +502,13 @@ class MAPPOTrainer:
                     mov_feats_b, pm_mask_b, phase_mask_b)
                 logits_b = self.actor.forward_batched(
                     le_ctx_b, ppl_b, phase_mask_b)   # (B, N, P)
-                values_b = self.critic(le_raw_b)     # (B,)
+                # Detach (optional): stop the value gradient from flowing
+                # back into the shared encoder, so the encoder is shaped
+                # only by the policy. The critic still trains on its own
+                # params against the (detached) embeddings.
+                critic_in = (le_raw_b.detach()
+                             if self.cfg.detach_critic_input else le_raw_b)
+                values_b = self.critic(critic_in)    # (B,) or (B, n_tls)
 
                 new_logprobs, entropy = SharedActor.evaluate_actions(
                     logits_b, actions_all[idx_t])  # (B, n)
@@ -493,8 +524,15 @@ class MAPPOTrainer:
                                       pol_loss_clipped).mean()
 
                 # Value loss with clipping (MAPPO recipe).
+                # Independent critic: per-light values/returns (B, n_tls),
+                # each light regressed to its own return. Centralized:
+                # scalar joint value (B,), so collapse the per-light
+                # returns to the joint mean to match the single baseline.
                 old_values = old_values_all[idx_t]
-                returns_mb = ret_all[idx_t].mean(dim=-1)  # joint return
+                if self.cfg.critic_mode == "independent":
+                    returns_mb = ret_all[idx_t]            # (B, n_tls)
+                else:
+                    returns_mb = ret_all[idx_t].mean(dim=-1)  # joint (B,)
                 v_clipped = old_values + torch.clamp(
                     values_b - old_values,
                     -self.cfg.value_clip_eps, self.cfg.value_clip_eps)
@@ -881,6 +919,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--adv-norm", choices=["pooled", "per_light"],
                    default=None,
                    help="Advantage normalization scope (default pooled).")
+    p.add_argument("--critic-mode", choices=["independent", "centralized"],
+                   default=None,
+                   help="Per-light value baseline (independent, default) "
+                        "or single joint value (centralized).")
+    p.add_argument("--detach-critic", action="store_true",
+                   help="Stop value gradient from reshaping the shared "
+                        "FRAP encoder (encoder becomes policy-only).")
     return p.parse_args()
 
 
@@ -911,6 +956,10 @@ def main() -> int:
         cfg_overrides["entropy_coef_final"] = args.entropy_coef_final
     if args.adv_norm is not None:
         cfg_overrides["adv_norm"] = args.adv_norm
+    if args.critic_mode is not None:
+        cfg_overrides["critic_mode"] = args.critic_mode
+    if args.detach_critic:
+        cfg_overrides["detach_critic_input"] = True
     cfg = MAPPOConfig(
         total_episodes=args.episodes,
         rollout_episodes=args.rollout_episodes,
