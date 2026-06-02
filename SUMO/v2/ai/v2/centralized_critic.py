@@ -74,3 +74,56 @@ class CentralCritic(nn.Module):
         if squeeze:
             v = v.squeeze()
         return v
+
+
+class IndependentCritic(nn.Module):
+    """Per-light value V_i(s_i) for IPPO-style training (CTDE dropped).
+
+    Each light's value is computed from ITS OWN embedding by a
+    parameter-shared MLP (shared across all lights, exactly like
+    ``SharedActor`` shares its body). The output is a per-light value
+    VECTOR, so each light's GAE advantage is taken against its own
+    baseline.
+
+    Why this exists: the ``CentralCritic`` predicts a single joint value
+    broadcast to all 12 lights. With a shared baseline, a light's
+    advantage = (its local return) - (the same joint V) does not isolate
+    whether *that light's own action* was good -- it mostly reflects
+    corridor-wide noise. Diagnostics showed the resulting policy gradient
+    never sharpened the actor (entropy pinned, ratio_dev ~0.01) under any
+    clip / entropy / normalization setting. An independent per-light
+    baseline restores per-agent credit assignment, matching the
+    independent-learner structure that V1 (per-TLS DQN) already won with.
+
+    Shape contract mirrors ``CentralCritic`` on the batch dim so the
+    trainer can swap them by config, but the OUTPUT gains a per-light
+    axis: (B, n_tls) instead of (B,).
+    """
+
+    def __init__(self, embed_dim: int = 128, n_tls: int = 12,
+                 hidden_dim: int = 512):
+        super().__init__()
+        # Body operates on a single light's embed_dim; applied
+        # broadcast over the n_tls axis so lights stay independent and
+        # the parameter count is light-count-agnostic.
+        self.fc1 = nn.Linear(embed_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)
+        self.head = nn.Linear(hidden_dim, 1)
+        self.embed_dim = embed_dim
+        self.n_tls = n_tls
+
+    def forward(self, light_embeddings: torch.Tensor) -> torch.Tensor:
+        """Args:
+            light_embeddings: (B, n_tls, embed_dim) or (n_tls, embed_dim).
+        Returns:
+            (B, n_tls) or (n_tls,) -- one value per light. The MLP is
+            applied over the last (embed) dim only; the n_tls axis is
+            preserved, so each light's value depends only on its own
+            embedding.
+        """
+        h = torch.relu(self.ln1(self.fc1(light_embeddings)))
+        h2 = torch.relu(self.ln2(self.fc2(h)) + h)
+        v = self.head(h2).squeeze(-1)  # (..., n_tls)
+        return v
