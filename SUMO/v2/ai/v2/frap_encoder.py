@@ -185,3 +185,26 @@ class FRAPEncoder(nn.Module):
         light_embeddings = ((phase_embeds * pm_f).sum(dim=1)
                             / per_tls_phase_count)  # (B, D)
         return light_embeddings, phase_prelogits
+
+    def phase_embeddings_batched(self, mov_feats: torch.Tensor,
+                                 phase_movement_mask: torch.Tensor
+                                 ) -> torch.Tensor:
+        """Per-phase embeddings, before any competition collapse.
+
+        This is the representation V3's Q-head consumes: one embedding
+        per phase slot, so Q(phase) depends on THAT phase's movements
+        (avoids the V2 actor's phase-constant-embedding dilution).
+
+        Args:
+            mov_feats: (B, M_max, mov_feat_dim)
+            phase_movement_mask: (B, P_max, M_max) bool.
+        Returns:
+            (B, P_max, embed_dim). Padded phase slots hold the masked
+            mean of zero movements -> zeros (clamp_min(1.0) guards the
+            divide); downstream masks them out by phase_mask anyway.
+        """
+        mov_embeds = self.movement_mlp(mov_feats)            # (B,M,D)
+        mask_f = phase_movement_mask.to(mov_embeds.dtype)
+        per_phase_count = mask_f.sum(dim=-1, keepdim=True).clamp_min(1.0)
+        weights = mask_f / per_phase_count
+        return torch.einsum("bpm,bmd->bpd", weights, mov_embeds)
