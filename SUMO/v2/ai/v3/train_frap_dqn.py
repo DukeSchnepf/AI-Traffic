@@ -60,12 +60,16 @@ def main() -> int:
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--eval-seeds", type=int, nargs="+",
                     default=[1042, 1043, 1044])
+    ap.add_argument("--reward-mode", default="max_pressure_net",
+                    help="Env reward. 'combined' directly rewards "
+                         "throughput + wait (no gridlock loophole that "
+                         "max_pressure has on heavy demand).")
     ap.add_argument("--out-dir", default="ai/runs/v3_frap_dqn")
     args = ap.parse_args()
 
     adjacency = load_adjacency(args.adjacency)
     common = dict(sumo_cfg_file=args.sumo_cfg, adjacency=adjacency,
-                  time_limit=args.time_limit, reward_mode="max_pressure_net",
+                  time_limit=args.time_limit, reward_mode=args.reward_mode,
                   control_tls=True, seed=args.seed)
     env = MultiTlsEnv(**common)
     eval_env = MultiTlsEnv(**common)
