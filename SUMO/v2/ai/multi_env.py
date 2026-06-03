@@ -51,6 +51,8 @@ class MultiTlsEnv:
         decision_interval: int = 5,
         reward_mode: str = "max_pressure_net",
         reward_gamma: float = 0.05,
+        reward_alpha: float = 1.0,
+        reward_beta: float = 0.05,
         control_tls: bool = True,
         seed: int = 42,
         use_gui: bool = False,
@@ -87,6 +89,8 @@ class MultiTlsEnv:
                 decision_interval=decision_interval,
                 reward_mode=reward_mode,
                 reward_gamma=reward_gamma,
+                reward_alpha=reward_alpha,
+                reward_beta=reward_beta,
                 control_tls=control_tls,
                 neighbor_aware=True,
                 neighbor_ids=[

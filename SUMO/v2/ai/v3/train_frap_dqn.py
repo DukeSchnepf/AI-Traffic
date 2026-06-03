@@ -71,12 +71,18 @@ def main() -> int:
     ap.add_argument("--tau", type=float, default=0.0,
                     help="Polyak soft target-update rate (e.g. 0.005). "
                          "0 = hard sync. Fixes mid-training collapse.")
+    ap.add_argument("--reward-alpha", type=float, default=1.0,
+                    help="combined reward: throughput (arrived) weight.")
+    ap.add_argument("--reward-beta", type=float, default=0.05,
+                    help="combined reward: wait-reduction weight. Raise "
+                         "to optimize delay harder (toward native's wait).")
     ap.add_argument("--out-dir", default="ai/runs/v3_frap_dqn")
     args = ap.parse_args()
 
     adjacency = load_adjacency(args.adjacency)
     common = dict(sumo_cfg_file=args.sumo_cfg, adjacency=adjacency,
                   time_limit=args.time_limit, reward_mode=args.reward_mode,
+                  reward_alpha=args.reward_alpha, reward_beta=args.reward_beta,
                   control_tls=True, seed=args.seed)
     env = MultiTlsEnv(**common)
     eval_env = MultiTlsEnv(**common)
