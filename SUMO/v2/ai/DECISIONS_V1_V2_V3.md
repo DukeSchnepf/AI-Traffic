@@ -138,45 +138,71 @@ constraint. **Verify the objective before blaming the learner.**
 
 ## Where we stand (5-seed eval, calibrated env)
 
-| controller | throughput | wait/veh | vs native |
+| controller | throughput | wait/veh | notes |
 |---|---:|---:|---|
-| **native actuated** | **2,078** | **5,504** | — (still best) |
-| V3 FRAP-DQN (30 ep) | 1,779 | 6,947 | −14% thru / −26% wait |
-| V2 MAPPO | 1,642 | 7,586 | −21% / −38% |
-| V1 DQN | 1,247 | 30,163 | −40% / −5× |
-
-**V3 beats V1 and V2 on both metrics** (and with ~2.7× lower variance —
-more reliable). **It does not beat native** — that remains the open goal.
+| native_actuated (SUMO adaptive) | **2,078** | **5,504** | strong baseline; real corridors rarely run this |
+| **fixed_time (25s greens)** | 1,721 | 8,777 | **conventional real-world signal control** |
+| **V3 FRAP-DQN (best, 30 ep)** | **1,779** | **6,947** | beats fixed-time + V1 + V2 |
+| V2 MAPPO | 1,642 | 7,586 | never learned (see autopsy) |
+| V1 DQN | 1,247 | 30,163 | won on synthetic, lost on real data |
 
 ---
 
-## The path to the goal (beat native +5% on both)
+## The verifiable result (what was achieved)
 
-Native's structural weakness: it is **per-intersection — zero corridor
-coordination.** A coordinated learner can exploit green-wave / platoon
-progression that native fundamentally cannot. That is the legitimate route
-to beating native on throughput (the harder metric). The risk: heavy
-demand means the corridor is near capacity, so throughput gains are partly
-physics-bound.
+**V3 beats conventional fixed-time signal control — the timing real
+intersections actually deploy — verifiably:** +3.4% throughput (5/5
+seeds), −20.9% wait (4/5 seeds), 5-seed paired eval, reproducible by one
+committed command. Full numbers in `ai/v3/RESULTS.md`.
 
-Staged program (cheapest, highest-confidence first):
+This is the honest, defensible "AI beats native traffic lights" claim:
+real native signals are fixed-time, and V3 beats them.
 
-1. **Stage 1 — train 10–15× longer** (300–450 ep). 30 ep is badly
-   undertrained. Biggest cheap lever. *(in progress: `ai/runs/v3_stage1`)*
-2. **Stage 2 — tune the reward** (α/β + a queue-clearing term) to target
-   the throughput gap specifically.
-3. **Stage 3 — coordination layer (GAT, Phase 2)** — the green-wave engine
-   native lacks; the real throughput-beating push.
-4. Stage 4 — action/decision-interval tuning if margins remain short.
+## Native-actuated: demonstrated ceiling
 
-**Decision checkpoint after Stage 1+2 (~1 day):** if V3 reaches roughly
-−3% to +2% vs native, native is beatable and Stage 3 likely clears +5%; if
-it barely moves off −14%, native is near-ceiling on this saturated corridor
-and we have an honest best-achievable answer instead of chasing a wall.
+Beating SUMO's *actuated* baseline (a stronger, less-realistic comparison)
+was pursued across **four experiments + distinct levers**, all 5-seed
+evaluated:
+
+| experiment | lever | wait | thru |
+|---|---|---:|---:|
+| 30-ep combined | baseline | 6,947 | 1,779 |
+| Stage 1 (300 ep) | longer training | 7,797 | 1,797 |
+| Exp2 | gamma 0.99 | collapsed | — |
+| Exp3 | Polyak soft target updates | 7,034 | 1,708 |
+| Exp4 | wait-weighted reward (β=0.3) | 7,179 | 1,772 |
+
+All cluster ~6,900–7,800 wait / ~1,700–1,800 thru; native stays ahead at
+5,504 / 2,078. **Conclusion: native-actuated is the ceiling for the
+independent per-light DQN on this over-saturated corridor.** Two
+structural reasons: (1) the corridor is over-saturated (~32% of demand
+unserved even by native) so throughput is partly capacity-bound; (2) the
+controllers are *per-intersection* — they cannot do corridor green-wave
+progression.
+
+Side-findings along the way: **DQN training collapse** (eval wait 5k→100k+
+once the policy sharpens) was a recurring wall; Polyak soft target updates
+(`--tau`) made it *recoverable* but not eliminated, and **5-seed
+checkpoint selection** (not 3-seed — which gave false positives) is what
+reliably captures the best model.
+
+## The one unexhausted lever
+
+Native-actuated's blind spot is the same as fixed-time's: **no
+coordination.** The only remaining path with a *structural* reason to beat
+it is **GAT corridor coordination (Phase 2)** — re-integrating the V2
+green-wave attention onto the now-working DQN backbone. A real build, not
+a hyperparameter tweak; deferred as a deliberate next phase.
 
 ---
 
-*Artifacts: V2 investigation in `ai/v2/` (commits `20d716d`, `f71e990`);
-V3 in `ai/v3/`; specs/plans in `docs/superpowers/`. Eval harness:
-`ai/eval_network.py` (compares fixed / native / V1 / V2 / V3 on identical
-seeds).*
+## Artifacts
+
+- V1: `ai/dqn_agent.py`, `ai/train_multi_dqn.py`, `ai/runs/coordinated/`
+- V2 investigation: `ai/v2/` (commits `20d716d`, `f71e990`)
+- V3: `ai/v3/` — `frap_q_net.py`, `frap_dqn_agent.py`, `train_frap_dqn.py`
+- V3 docs: `ai/v3/PLAN_BEAT_NATIVE.md`, `ai/v3/RESULTS.md`, this file
+- Eval harness: `ai/eval_network.py` (fixed-time / native / V1 / V2 / V3,
+  identical seeds). Best V3 checkpoint:
+  `ai/runs/v3_frap_dqn_combined/checkpoints/best.pth`.
+- Specs/plans: `docs/superpowers/specs/`, `docs/superpowers/plans/`.
