@@ -131,3 +131,33 @@ python -m ai.v2.tests.test_smoke   # 7 tests, requires only torch + numpy
 
 Knowledge-graph view of the whole codebase (V1 + V2) is in
 `graphify-out/` — open `graph.html` in a browser.
+
+---
+
+## V3 (current) — FRAP-DQN: the verifiable win
+
+V2's MAPPO actor never learned (six-hypothesis autopsy in `ai/v2/`). V3
+returns FRAP to its native value-based setting on V1's proven Double-DQN
+backbone, and **it learns**. Full story: `ai/DECISIONS_V1_V2_V3.md`.
+
+**Result (5-seed, calibrated env, reproducible):** V3 beats conventional
+**fixed-time** signal control — the timing real intersections deploy — by
+**+3.4% throughput / −20.9% wait**. It does not beat SUMO's *actuated*
+baseline (the saturated-corridor ceiling; see `ai/v3/RESULTS.md`).
+
+```bash
+# Train (the reward matters: 'combined' avoids max_pressure's gridlock loophole)
+python ai/v3/train_frap_dqn.py --episodes 150 --reward-mode combined \
+    --tau 0.005 --eval-seeds 1042 1043 1044 1045 1046
+
+# Verifiable eval: V3 vs fixed-time vs native, 5 seeds
+python ai/eval_network.py --sumo-cfg sim_calibrated.sumocfg \
+    --v3-ckpt ai/runs/v3_frap_dqn_combined/checkpoints/best.pth \
+    --episodes 5 --fixed-green-seconds 25
+
+# Unit tests (no SUMO): per-phase Q discrimination + agent
+python -m ai.v3.tests.test_frap_q
+```
+
+V3 docs: `ai/v3/RESULTS.md` (numbers), `ai/v3/PLAN_BEAT_NATIVE.md` (plan),
+`ai/DECISIONS_V1_V2_V3.md` (full V1→V2→V3 decision history).
