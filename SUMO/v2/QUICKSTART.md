@@ -55,10 +55,19 @@ GitHub under `SUMO/v2/ai/v3/plots/`.
 
 ## 4. Watch it drive traffic live (browser)
 
+Use **two terminals** (both from `SUMO/v2/`). Serve the page over HTTP —
+opening `index.html` as a `file://` URL won't connect reliably in some
+browsers.
+
 ```bash
-python run_websocket_ai.py          # starts SUMO + WebSocket server
-# then open frontend/index.html in a browser
+# Terminal 1 — backend: SUMO + WebSocket server (ws://localhost:8765)
+python run_websocket_ai.py
+
+# Terminal 2 — serve the frontend
+cd frontend && python -m http.server 8000
 ```
+
+Then open **http://localhost:8000/index.html** in your browser.
 
 - Vehicles move in a 3D view; the 12 lights are driven by the AI.
 - **Model dropdown (top bar):** switch the active controller —
