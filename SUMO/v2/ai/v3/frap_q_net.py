@@ -35,7 +35,7 @@ class FRAPQNet(nn.Module):
         (B, P_max) Q-values, with padded phase slots at -1e9.
     """
 
-    def __init__(self, mov_feat_dim: int = 3, embed_dim: int = 128,
+    def __init__(self, mov_feat_dim: int = 5, embed_dim: int = 128,
                  head_hidden: int = 128):
         super().__init__()
         self.encoder = FRAPEncoder(mov_feat_dim=mov_feat_dim,

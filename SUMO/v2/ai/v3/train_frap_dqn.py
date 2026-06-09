@@ -91,7 +91,7 @@ def main() -> int:
     b0 = env.get_state_frap_batch()
     p_max = b0["phase_mask"].shape[1]
     m_max = b0["movement_features"].shape[1]
-    agent = FRAPDQNAgent(mov_feat_dim=3, p_max=p_max, m_max=m_max,
+    agent = FRAPDQNAgent(mov_feat_dim=5, p_max=p_max, m_max=m_max,
                          gamma=args.gamma, lr=args.lr,
                          target_sync_steps=args.target_sync, tau=args.tau)
 

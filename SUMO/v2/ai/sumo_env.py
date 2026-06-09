@@ -306,8 +306,13 @@ class SumoTrafficEnv:
         would erase the phase symmetries FRAP exploits.
 
         Keys:
-          movement_features    : np.ndarray[num_movements, 3] of
-                                 (halting, vehicles, waiting_time)
+          movement_features    : np.ndarray[num_movements, 5] of
+                                 (halting, vehicles, waiting_time,
+                                  is_green, time_in_phase). The first three
+                                 are normalised to [0,1]; is_green is this
+                                 movement's signal under the active phase
+                                 ('G'/'g' -> 1.0); time_in_phase is shared
+                                 across all movements.
           phase_movement_mask  : np.ndarray[num_green, num_movements] bool;
                                  mask[slot, m] is True iff movement m has
                                  a green signal ('G' or 'g') in that phase.
@@ -326,19 +331,36 @@ class SumoTrafficEnv:
         controlled_links = conn.trafficlight.getControlledLinks(self.tls_id)
         n_mov = len(controlled_links)
 
-        feats = np.zeros((n_mov, 3), dtype=np.float32)
+        # Current phase context for the green-bit (T0.2): the Q-net needs to
+        # know which movements are green *now* to tell "hold" (free) from
+        # "switch" (costs a yellow + switch penalty).
+        cur_phase = self._phase_states[
+            self._green_phase_indices[self._current_green_slot]]
+        t_in_phase = min(self._time_in_phase, 120) / 120.0
+
+        feats = np.zeros((n_mov, 5), dtype=np.float32)
         for i, link_group in enumerate(controlled_links):
             lanes = set()
             for entry in link_group:
                 if entry:
                     lanes.add(entry[0])  # from-lane
-            if not lanes:
-                continue
-            queue = sum(conn.lane.getLastStepHaltingNumber(l) for l in lanes)
-            vehicles = sum(conn.lane.getLastStepVehicleNumber(l)
-                           for l in lanes)
-            waiting = sum(conn.lane.getWaitingTime(l) for l in lanes)
-            feats[i] = (queue, vehicles, waiting)
+            if lanes:
+                queue = sum(conn.lane.getLastStepHaltingNumber(l)
+                            for l in lanes)
+                vehicles = sum(conn.lane.getLastStepVehicleNumber(l)
+                               for l in lanes)
+                waiting = sum(conn.lane.getWaitingTime(l) for l in lanes)
+                # Normalise to [0,1] (T0.3): raw waiting reaches hundreds-
+                # thousands of seconds under saturation and otherwise swamps
+                # the shared movement MLP by ~2 orders of magnitude.
+                feats[i, 0] = min(queue, 40) / 40.0
+                feats[i, 1] = min(vehicles, 60) / 60.0
+                feats[i, 2] = min(waiting, 300.0) / 300.0
+            # Phase features (T0.2): per-movement green bit under the active
+            # phase + normalised time-in-phase (same value for every row).
+            if i < len(cur_phase) and cur_phase[i] in ("G", "g"):
+                feats[i, 3] = 1.0
+            feats[i, 4] = t_in_phase
 
         mask = np.zeros((self._num_green, n_mov), dtype=bool)
         for slot_idx, phase_idx in enumerate(self._green_phase_indices):

@@ -72,7 +72,7 @@ class FRAPReplayBuffer:
 
 
 class FRAPDQNAgent:
-    def __init__(self, mov_feat_dim: int = 3, p_max: int = 6,
+    def __init__(self, mov_feat_dim: int = 5, p_max: int = 6,
                  m_max: int = 16, embed_dim: int = 128,
                  lr: float = 5e-4, gamma: float = 0.95,
                  buffer_capacity: int = 50_000, batch_size: int = 64,

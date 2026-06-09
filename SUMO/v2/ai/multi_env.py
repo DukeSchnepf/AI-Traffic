@@ -343,7 +343,7 @@ class MultiTlsEnv:
 
         Returns:
             {
-              "movement_features"   : float32 [n_tls, max_movements, 3]
+              "movement_features"   : float32 [n_tls, max_movements, 5]
               "movement_mask"       : bool    [n_tls, max_movements]
                   (True for the real signal indices on this TLS;
                   False at right-pad positions.)
@@ -363,15 +363,20 @@ class MultiTlsEnv:
         p_max = self.frap_p_max
         m_max = self.frap_max_movements
 
-        mov_feats = np.zeros((n, m_max, 3), dtype=np.float32)
+        # Read every light's FRAP state once, then size the movement-feature
+        # tensor from the actual per-movement feature width (5 after the
+        # green-bit + time-in-phase additions) rather than a hardcoded 3.
+        states = [self.units[tid].get_state_frap() for tid in ids]
+        f_dim = states[0]["movement_features"].shape[1]
+
+        mov_feats = np.zeros((n, m_max, f_dim), dtype=np.float32)
         mov_mask = np.zeros((n, m_max), dtype=bool)
         pm_mask = np.zeros((n, p_max, m_max), dtype=bool)
         phase_mask = np.zeros((n, p_max), dtype=bool)
         cur_slot = np.zeros((n,), dtype=np.int64)
         t_in_phase = np.zeros((n,), dtype=np.float32)
 
-        for i, tid in enumerate(ids):
-            s = self.units[tid].get_state_frap()
+        for i, s in enumerate(states):
             f = s["movement_features"]
             n_mov = f.shape[0]
             n_grn = s["num_green"]
