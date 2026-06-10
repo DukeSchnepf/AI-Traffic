@@ -77,11 +77,16 @@ class FRAPDQNAgent:
                  lr: float = 5e-4, gamma: float = 0.95,
                  buffer_capacity: int = 50_000, batch_size: int = 64,
                  target_sync_steps: int = 500,
-                 tau: float = 0.0,
+                 tau: float = 0.0, n_step: int = 1,
                  device: Optional[str] = None):
         self.p_max = p_max
         self.m_max = m_max
         self.gamma = gamma
+        # n-step return horizon. The trainer accumulates the n-step
+        # discounted reward and the state n decisions later, so the
+        # bootstrap term in learn() is discounted by gamma**n_step.
+        # n_step=1 is the standard 1-step DQN target (back-compat default).
+        self.n_step = int(n_step)
         self.batch_size = batch_size
         self.target_sync_steps = target_sync_steps
         # tau>0 => Polyak soft target updates every learn step
@@ -145,7 +150,7 @@ class FRAPDQNAgent:
             next_actions = torch.argmax(next_online, dim=1, keepdim=True)
             next_q = self.target(nmov, npm, nph).gather(
                 1, next_actions).squeeze(1)
-            target_q = r + self.gamma * next_q * (1.0 - d)
+            target_q = r + (self.gamma ** self.n_step) * next_q * (1.0 - d)
 
         loss = self.loss_fn(current_q, target_q)
         self.optimizer.zero_grad()
