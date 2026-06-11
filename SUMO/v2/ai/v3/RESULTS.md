@@ -47,6 +47,39 @@ and ~3% on throughput, verified on 5 paired seeds" is the honest,
 defensible, deployment-relevant result — exactly the control an RL
 corridor controller would replace.
 
+## V4 re-test (2026-06-10): post-audit retraining — negative result
+
+The audit's four fixes (F1 outflow reward, F2 phase features, F3
+normalization, F4 3s yellows) were implemented and re-tested across
+three training campaigns. **None matched the pre-audit di2 checkpoint.**
+
+| run | config | best harvested (sel. seeds) | official 42–46 |
+|---|---|---:|---:|
+| v3_di2 (pre-audit) | raw state, di=2, eff. wait-diff | 4,593 / 1,940 | **5,044 / 1,924** |
+| v4_stage0 | F1–F4, di=5, alpha=1 | 5,912 / 1,751 | 6,806 / 1,710 (gate FAIL) |
+| v4_stage1 | + n-step 3, eps/2, lpd 2 | 9,016 / 1,725 | (collapsed by ep 60) |
+| v4_b | di2 regime exactly + V4 state | 17,697 / 1,512 | (not worth evaling) |
+
+Attribution: `v4_b` held di2's entire regime fixed (di=2, alpha=0,
+beta=0.05, 50 ep, eps-decay 30, 1-step) and changed only the state
+(F2/F3) and yellows (F4) — and the jackpot policies vanished. Meanwhile
+`v3_di2_s7` (same old config, different seed) jackpotted repeatedly
+(3.7k–9.3k) and `v3_di1` hit 6.3k by ep 5: the old-state pipeline visits
+excellent policies robustly. **Prime suspect: F3's clipping saturates on
+this over-saturated corridor** — `min(waiting,300)/300` pins at 1.0 for
+nearly every congested movement (summed waiting reaches thousands of
+seconds), erasing exactly the congestion *ranking* the Q-net needs. The
+raw features were ill-conditioned but information-rich; the clipped ones
+are well-conditioned but flat. Untested fix: saturation-free scaling,
+e.g. `log1p(x)/log1p(cap)` without a hard min().
+
+Notes that stand regardless: training is a violent oscillator in every
+configuration (di2's own evals swung 4.6k–123k; its best checkpoint is a
+harvested peak, validated out-of-sample on 42–46). The fixed-time win
+above is unaffected. The "beats native-actuated on wait 4/5 seeds" claim
+(eval_di2.txt) rests on that single harvested checkpoint and was not
+reproduced by any post-audit run — treat it as provisional.
+
 ## Native-actuated: demonstrated ceiling (not for lack of trying)
 
 > **⚠ 2026-06-09 audit caveat — ceiling conclusion suspended.** All four

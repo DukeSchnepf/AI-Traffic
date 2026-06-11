@@ -1,10 +1,37 @@
 # AI pipeline — handoff
 
-## Current handoff (2026-06-09): V4 remediation + retrain
+## Current status (2026-06-10): V4 executed — gates failed, diagnosis in hand
 
-The active work is executing the post-audit V4 plan. Read in this order
-— it is everything the executing agent needs, no repo exploration
-required:
+V4 Stages 0–1 and a controlled di2-replication run (Plan B) are done, on
+branch `v4-stage0`. **All post-audit retrains failed to match the
+pre-audit `v3_di2` checkpoint** (still the production best: 5,044 wait /
+1,924 tput on seeds 42–46, beats native on wait 4/5). Full numbers and
+attribution: `ai/v3/RESULTS.md` § "V4 re-test". Headline finding: the
+F3 normalization caps (`min(waiting,300)/300` etc.) saturate flat on
+this over-saturated corridor and destroy the congestion ranking the
+Q-net learns from — the raw state, not the regime, is why old runs
+found jackpot policies. Code fixes F1–F4 + T1 stability kit +
+`--decision-interval` are all committed and tested regardless.
+
+Next lever (untested, one run): saturation-free feature scaling
+(`log1p(x)/log1p(cap)`, no hard min) in `get_state_frap()`, re-run the
+di2 regime (`--decision-interval 2 --reward-alpha 0 --episodes 50
+--eps-decay-episodes 30 --n-step 1 --learn-per-decision 1 --tau 0`).
+Success bar: harvested best ≤ di2's 4.6k on selection seeds, then the
+official 42–46 eval. After that: Stage 2a (coordination context) per
+`ai/v3/PLAN_V4_EXECUTION.md`.
+
+Ops notes that cost us a day: run training/evals **detached + python -u**
+(`Start-Process` pattern in this session's logs) — harness-tracked
+background jobs got killed under machine load; `eval_network.py`
+auto-loads a V2 MAPPO checkpoint that is shape-incompatible with the
+5-feature state (pass `--v2-ckpt` to a nonexistent path to skip);
+training is a violent oscillator in every config — judge harvested
+checkpoints, never final-episode performance.
+
+## Original V4 handoff (2026-06-09), now executed
+
+The plan documents below remain the reference for Stage 2a/3:
 
 1. **`ai/TRAINING_REVIEW.md`** — code audit, findings F1–F8 with
    file:line anchors (headline: the `combined` reward's throughput term
